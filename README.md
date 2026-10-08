@@ -136,11 +136,11 @@ to.
 ## Library
 
 ```sh
-npm install laya-compaction
+npm install @bussolabs/laya-compaction
 ```
 
 ```ts
-import { compactMessages, reductionRatio, type Message } from 'laya-compaction';
+import { compactMessages, reductionRatio, type Message } from '@bussolabs/laya-compaction';
 
 const transcript: Message[] = [
   { role: 'user', text: 'Fix the failing test. Never edit src/generated.', toolUses: [] },
