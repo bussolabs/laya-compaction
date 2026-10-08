@@ -32,7 +32,7 @@ export interface Message {
 
 /** A tool call paired with its result by `tool_use_id`. */
 export interface ToolCall {
-  /** Short id used in the Jev state and question names (`t1`, `t2`, ...). */
+  /** Short id used in the Laya state and question names (`t1`, `t2`, ...). */
   id: string;
   tool_use_id: string;
   tool: string;
@@ -48,9 +48,9 @@ export interface ToolCall {
 }
 
 export interface CallAnswer {
-  /** Jev's probability that the call itself still matters. */
+  /** Laya's probability that the call itself still matters. */
   keepCall: number;
-  /** Jev's probability that the full result still needs to stay verbatim. */
+  /** Laya's probability that the full result still needs to stay verbatim. */
   keepResult: number;
 }
 
@@ -78,7 +78,7 @@ export interface HistoryEntry {
   tool_calls?: HistoryToolCall[] | string[];
 }
 
-/** The state sent with every Jev request: the whole history, results omitted. */
+/** The state sent with every Laya request: the whole history, results omitted. */
 export interface CompactionState {
   context: string;
   goal: string;
@@ -99,9 +99,14 @@ export interface CompactOptions {
   keepThreshold?: number;
   /** Newest messages never touched (the first message is always kept). Default 6. */
   preserveRecentMessages?: number;
-  /** Estimated token ceiling for the state. Default 25000. */
+  /**
+   * Laya's token window (`max_len`), sent with every request: the state and
+   * one question header share it. Default 4096.
+   */
+  maxLen?: number;
+  /** Estimated token ceiling for the state. Default `maxLen` minus 112 for the question header. */
   maxStateTokens?: number;
-  /** Estimated token ceiling for state plus one batch of questions. Default 30000. */
+  /** Estimated token ceiling for state plus one batch of questions in a request. Default 30000. */
   maxRequestTokens?: number;
   /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
@@ -111,6 +116,7 @@ export interface ResolvedCompactOptions {
   goal: string;
   keepThreshold: number;
   preserveRecentMessages: number;
+  maxLen: number;
   maxStateTokens: number;
   maxRequestTokens: number;
   truncateHeadChars: number;
@@ -138,8 +144,8 @@ export interface CompactResult {
   };
 }
 
-/** The `state` of a Jev request: a string or any JSON-serialisable object. */
-export type JevState = string | object;
+/** The `state` of a Laya request: a string or any JSON-serialisable object. */
+export type LayaState = string | object;
 
 export interface NoulQuestion {
   type: 'noul';
@@ -162,8 +168,8 @@ export interface ScoreQuestion {
   criteria: string[];
 }
 
-export type JevQuestion = NoulQuestion | ChoiceQuestion | ScoreQuestion;
-export type JevQuestions = Record<string, JevQuestion>;
+export type LayaQuestion = NoulQuestion | ChoiceQuestion | ScoreQuestion;
+export type LayaQuestions = Record<string, LayaQuestion>;
 
 export interface NoulAnswer {
   type?: 'noul';
@@ -184,19 +190,22 @@ export interface ScoreAnswer {
   probabilities: Record<string, number>;
 }
 
-export type JevAnswer = NoulAnswer | ChoiceAnswer | ScoreAnswer;
+export type LayaAnswer = NoulAnswer | ChoiceAnswer | ScoreAnswer;
 
-export interface JevResponse {
+export interface LayaResponse {
   model?: string;
-  answers: Record<string, JevAnswer>;
+  answers: Record<string, LayaAnswer>;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    /** laya-serve: true when some question saw a cut state. */
+    truncated?: boolean;
+    truncated_questions?: string[];
   };
   [key: string]: unknown;
 }
 
-/** Anything that can answer Jev questions: `JevClient`, or a host-provided adapter. */
-export interface JevAsker {
-  ask(state: JevState, questions: JevQuestions): Promise<JevResponse>;
+/** Anything that can answer Laya questions: `LayaClient`, or a host-provided adapter. */
+export interface LayaAsker {
+  ask(state: LayaState, questions: LayaQuestions): Promise<LayaResponse>;
 }

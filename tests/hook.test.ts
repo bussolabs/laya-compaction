@@ -6,7 +6,7 @@ import {
   resolveHookConfig,
   summarize,
   toSessionMessages,
-} from '../hooks/fast-jev.ts';
+} from '../hooks/laya.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
 type SessionMessage = Message & { handle?: string };
@@ -40,8 +40,9 @@ function transcript(): SessionMessage[] {
   ];
 }
 
-function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
-  return async (_url: string, init?: { body?: string }) => {
+function layaFetch(answer: (name: string) => number, bodies: string[] = [], urls: string[] = []) {
+  return async (url: string, init?: { body?: string }) => {
+    urls.push(url);
     bodies.push(init?.body ?? '');
     const { questions } = JSON.parse(init?.body ?? '{}') as { questions: Record<string, unknown> };
     const answers = Object.fromEntries(
@@ -53,14 +54,25 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest' });
+    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25 });
     expect(
-      resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
+      resolveHookConfig({
+        url: 'http://h',
+        apiKey: 'k',
+        keepThreshold: 0.3,
+        maxLen: 2048,
+        maxStateTokens: 1000,
+        model: 'multilingual',
+        goal: 'g',
+        compactAtPercent: 'no',
+      }),
     ).toEqual({
+      url: 'http://h',
       apiKey: 'k',
       keepThreshold: 0.3,
+      maxLen: 2048,
       maxStateTokens: 1000,
-      model: 'jev-x',
+      model: 'multilingual',
       goal: 'g',
       compactAtPercent: 60,
       minReductionRatio: 0.25,
@@ -83,11 +95,11 @@ describe('session message mapping', () => {
     expect(out[0]).toBe(messages[0]);
     expect(out[1]?.handle).toBeUndefined();
     expect(out[1]?.toolUses[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+      new RegExp(`^${'x'.repeat(300)}\\n\\[laya-compaction truncated 1700 chars`),
     );
     expect(out[2]?.handle).toBeUndefined();
     expect(out[2]?.toolResults?.[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+      new RegExp(`^${'x'.repeat(300)}\\n\\[laya-compaction truncated 1700 chars`),
     );
     expect(out[2]?.toolResults?.[0]).toMatchObject({ tool_use_id: 'tool-1', isError: false });
     expect(out[3]).toBe(messages[3]);
@@ -112,14 +124,16 @@ describe('session message mapping', () => {
 describe('compactSession', () => {
   it('runs the library over the engine fetch and reports the outcome', async () => {
     const bodies: string[] = [];
-    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k', model: 'jev-x' };
+    const urls: string[] = [];
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), url: 'http://h', apiKey: 'k', model: 'english' };
     const { result: output, messages } = await compactSession(
       transcript(),
       config,
-      jevFetch((name) => (name === 'call_t2' || name === 'result_t2' ? 0.9 : 0.1), bodies),
+      layaFetch((name) => (name === 'call_t2' || name === 'result_t2' ? 0.9 : 0.1), bodies, urls),
     );
     expect(bodies).toHaveLength(1);
-    expect(JSON.parse(bodies[0]!).model).toBe('jev-x');
+    expect(urls).toEqual(['http://h/v1/systemone']);
+    expect(JSON.parse(bodies[0]!).model).toBe('english');
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_call', 'keep']);
     expect(messages.map((m) => m.handle)).toEqual(['h-0', 'h-tool-2', 'r-tool-2', 'h-5', 'h-6']);
     expect(summarize(output)).toMatch(/^\d+% reduction; 1 kept, 1 call_dropped; state ~\d+ tokens \(full\) in 1 request\(s\)$/);
@@ -128,8 +142,8 @@ describe('compactSession', () => {
   });
 
   it('splits a long decision log into ui.log lines under the host limit', async () => {
-    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k' };
-    const { result: output } = await compactSession(transcript(), config, jevFetch(() => 0.1));
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), url: 'http://h' };
+    const { result: output } = await compactSession(transcript(), config, layaFetch(() => 0.1));
     const lines = decisionLogLines(output, 60);
     expect(lines).toEqual([
       'decisions (1/2): t1:Read:drop_call/call=0.10/result=0.10',
@@ -139,11 +153,49 @@ describe('compactSession', () => {
     expect(decisionLogLines({ ...output, decisions: [] })).toEqual(['decisions: (none)']);
   });
 
-  it('throws on a missing key and on failed requests so the hook falls back', async () => {
+  it('runs locally through the shared server, asking for multilingual', async () => {
+    const bodies: string[] = [];
+    const urls: string[] = [];
+    const spawned: (readonly string[])[] = [];
+    let up = false;
+    const driver = {
+      health: async () => up,
+      spawn: async (argv: readonly string[]) => {
+        spawned.push(argv);
+        up = true;
+        return { exitCode: 0, stderr: '' };
+      },
+      sleep: async () => {},
+      now: () => 0,
+    };
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), localPort: 8799, modelDir: '/ckpt' };
+    const { result: output } = await compactSession(
+      transcript(),
+      config,
+      layaFetch(() => 0.9, bodies, urls),
+      { driver, root: '/plugins/laya-compaction' },
+    );
+    expect(spawned[0]!.slice(3)).toEqual(['sh', '/plugins/laya-compaction', '8799', '/ckpt']);
+    expect(urls[0]).toBe('http://127.0.0.1:8799/v1/systemone');
+    expect(JSON.parse(bodies[0]!)).toMatchObject({ model: 'multilingual', max_len: 4096 });
+    expect(JSON.parse(bodies[0]!)).not.toHaveProperty('authorization');
+    expect(output.stats.kept).toBe(2);
+  });
+
+  it('throws without a URL or local server, without uv, and on failed requests so the hook falls back', async () => {
     const config = resolveHookConfig({ preserveRecentMessages: 1 });
-    await expect(compactSession(transcript(), config, jevFetch(() => 0))).rejects.toThrow(/TYPESAFE_API_KEY/);
+    await expect(compactSession(transcript(), config, layaFetch(() => 0))).rejects.toThrow(/LAYA_URL/);
     await expect(
-      compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
+      compactSession(transcript(), { ...config, url: 'http://h' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+    const noUv = {
+      health: async () => false,
+      spawn: async () => ({ exitCode: 127, stderr: 'uv not found' }),
+      sleep: async () => {},
+      now: () => 0,
+    };
+    await expect(
+      compactSession(transcript(), config, layaFetch(() => 0), { driver: noUv, root: '/p' }),
+    ).rejects.toThrow(/uv is not installed/);
   });
 });

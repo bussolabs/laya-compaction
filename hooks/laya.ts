@@ -1,4 +1,5 @@
 import type {
+  EngineInterface,
   On,
   PluginOptions,
   Register,
@@ -9,11 +10,17 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
-import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import {
+  ensureLocalServer,
+  LOCAL_MODEL,
+  localPort,
+  type LocalServerDriver,
+} from '../src/local-server.js';
+import { buildLayaRequest, DEFAULT_MAX_LEN, parseLayaResponse } from '../src/request.js';
 import type {
   CompactOptions,
   CompactResult,
-  JevAsker,
+  LayaAsker,
   Message,
   ToolResult,
   ToolUse,
@@ -22,8 +29,10 @@ import type {
 const HOOK_DEFAULTS = {
   compactAtPercent: 60,
   minReductionRatio: 0.25,
-  model: DEFAULT_MODEL,
 };
+
+/** How long a health probe may take before the server counts as down. */
+const HEALTH_TIMEOUT_MS = 2_000;
 
 export type HookFetchInit = {
   method?: string;
@@ -41,10 +50,15 @@ export type HookFetchResponse = {
 export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetchResponse>;
 
 export type HookConfig = CompactOptions & {
+  url?: string;
   apiKey?: string;
+  model?: string;
   compactAtPercent: number;
   minReductionRatio: number;
-  model: string;
+  /** Local mode only: port of the shared server (`LAYA_LOCAL_PORT`). */
+  localPort?: number;
+  /** Local mode only: fine-tuned checkpoint directory (`LAYA_MODEL_DIR`). */
+  modelDir?: string;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -63,6 +77,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   for (const key of [
     'keepThreshold',
     'preserveRecentMessages',
+    'maxLen',
     'maxStateTokens',
     'maxRequestTokens',
     'truncateHeadChars',
@@ -78,26 +93,30 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       'minReductionRatio',
       HOOK_DEFAULTS.minReductionRatio,
     ),
-    model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
   };
-  const apiKey = optionString(options, 'apiKey');
-  if (apiKey) config.apiKey = apiKey;
+  for (const key of ['url', 'apiKey', 'model'] as const) {
+    const value = optionString(options, key);
+    if (value) config[key] = value;
+  }
   const goal = optionString(options, 'goal');
   if (goal) config.goal = goal;
   return config;
 }
 
-/** A `JevAsker` over the engine's `$.http.fetch`. */
-export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string): JevAsker {
+/** A `LayaAsker` over the engine's `$.http.fetch`, for a `laya-serve` server. */
+export function layaAsker(
+  fetchFn: HookFetch,
+  params: { url: string; apiKey?: string; model?: string; maxLen?: number },
+): LayaAsker {
   return {
     async ask(state, questions) {
-      const request = buildJevRequest({ apiKey, model }, state, questions);
+      const request = buildLayaRequest(params, state, questions);
       const response = await fetchFn(request.url, {
         method: request.method,
         headers: request.headers,
         body: request.body,
       });
-      return parseJevResponse(response.status, response.ok, response.text);
+      return parseLayaResponse(response.status, response.ok, response.text);
     },
   };
 }
@@ -161,14 +180,38 @@ export type SessionCompaction = {
   messages: SessionMessage[];
 };
 
-/** Runs the library over a session transcript; throws when the key is missing or Jev fails. */
+export type HookLocal = {
+  driver: LocalServerDriver;
+  /** `$.plugin.root`: the plugin directory, which ships `serve/laya_serve.py`. */
+  root: string;
+};
+
+/**
+ * Runs the library over a session transcript: remote when `config.url` is set,
+ * otherwise through the shared local server, started when it is down. Throws
+ * when Laya fails, so the hook falls back.
+ */
 export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fetchFn: HookFetch,
+  local?: HookLocal,
 ): Promise<SessionCompaction> {
-  if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-  const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
+  const maxLen = config.maxLen ?? DEFAULT_MAX_LEN;
+  let asker: LayaAsker;
+  if (config.url) {
+    asker = layaAsker(fetchFn, { url: config.url, apiKey: config.apiKey, model: config.model, maxLen });
+  } else if (local) {
+    const url = await ensureLocalServer(local.driver, {
+      root: local.root,
+      port: localPort(config.localPort),
+      checkpoint: config.modelDir,
+    });
+    asker = layaAsker(fetchFn, { url, model: LOCAL_MODEL, maxLen });
+  } else {
+    throw new Error('LAYA_URL is not configured and the local server cannot be started here');
+  }
+  const result = await compact(messages, asker, { ...config, maxLen });
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -224,23 +267,64 @@ export function decisionLogLines(
   );
 }
 
-async function getApiKey(
-  $: {
-    env: { get: (name: string) => Promise<string | undefined> };
-    settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
-  },
-  config: HookConfig,
-): Promise<string | undefined> {
-  if (config.apiKey) return config.apiKey;
-  const fromEnv = await $.env.get('TYPESAFE_API_KEY');
-  if (fromEnv) return fromEnv;
-  const settings = await $.settings.read();
+/**
+ * The local-server driver over the engine: `$.http.fetch` for health,
+ * `$.process.run` for the spawn script (it backgrounds the server and returns
+ * at once), `$.clock` for waiting.
+ */
+function hookDriver($: EngineInterface, signal?: AbortSignal): LocalServerDriver {
+  return {
+    async health(url) {
+      try {
+        const health = $.http.fetch(`${url}/health`);
+        const timeout = $.clock.sleep(HEALTH_TIMEOUT_MS).then(() => undefined);
+        const response = await Promise.race([health, timeout]);
+        return response?.ok ?? false;
+      } catch {
+        return false;
+      }
+    },
+    async spawn(argv) {
+      const result = await $.process.run(argv, { timeoutMs: 30_000 });
+      return { exitCode: result.exitCode, stderr: result.stderr };
+    },
+    sleep: (ms) => $.clock.sleep(ms, signal ? { signal } : undefined),
+    now: () => $.clock.now(),
+  };
+}
+
+type EnvReader = {
+  env: { get: (name: string) => Promise<string | undefined> };
+  settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
+};
+
+function settingsEnv(settings: Readonly<Record<string, unknown>>, name: string): string | undefined {
   const env = settings['env'];
-  if (env && typeof env === 'object') {
-    const value = (env as Record<string, unknown>)['TYPESAFE_API_KEY'];
-    if (typeof value === 'string' && value) return value;
-  }
-  return undefined;
+  if (!env || typeof env !== 'object') return undefined;
+  const value = (env as Record<string, unknown>)[name];
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+/**
+ * Fills `url`, `apiKey` and `model` from plugin options, then the process
+ * environment, then settings `env`. `$.env.get` needs literal names.
+ */
+async function withEnvironment($: EnvReader, config: HookConfig): Promise<HookConfig> {
+  const settings = await $.settings.read();
+  const url = config.url ?? ((await $.env.get('LAYA_URL')) || settingsEnv(settings, 'LAYA_URL'));
+  const apiKey =
+    config.apiKey ?? ((await $.env.get('LAYA_API_KEY')) || settingsEnv(settings, 'LAYA_API_KEY'));
+  const model =
+    config.model ?? ((await $.env.get('LAYA_MODEL')) || settingsEnv(settings, 'LAYA_MODEL'));
+  const port = (await $.env.get('LAYA_LOCAL_PORT')) || settingsEnv(settings, 'LAYA_LOCAL_PORT');
+  const modelDir = (await $.env.get('LAYA_MODEL_DIR')) || settingsEnv(settings, 'LAYA_MODEL_DIR');
+  const resolved = { ...config };
+  if (url) resolved.url = url;
+  if (apiKey) resolved.apiKey = apiKey;
+  if (model) resolved.model = model;
+  if (port) resolved.localPort = localPort(port);
+  if (modelDir) resolved.modelDir = modelDir;
+  return resolved;
 }
 
 function notify(
@@ -262,11 +346,16 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('session.compact', async ($, event, next) => {
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
-      const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
-        const response = await $.http.fetch(url, init);
-        return { status: response.status, ok: response.ok, text: response.text };
-      });
+      const config = await withEnvironment($, configured);
+      const { result, messages } = await compactSession(
+        event.messages,
+        config,
+        async (url, init) => {
+          const response = await $.http.fetch(url, init);
+          return { status: response.status, ok: response.ok, text: response.text };
+        },
+        { driver: hookDriver($, next.signal), root: $.plugin.root },
+      );
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(

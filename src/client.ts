@@ -1,35 +1,39 @@
-import { buildJevRequest, parseJevResponse } from './request.js';
-import type { JevAsker, JevQuestions, JevResponse, JevState } from './types.js';
+import { buildLayaRequest, parseLayaResponse } from './request.js';
+import type { LayaAsker, LayaQuestions, LayaResponse, LayaState } from './types.js';
 
-export interface JevClientOptions {
-  /** Defaults to `process.env.TYPESAFE_API_KEY`. */
+export interface LayaClientOptions {
+  /** `laya-serve` base URL. Defaults to `process.env.LAYA_URL`. */
+  url?: string;
+  /** Bearer key, sent only when set. Defaults to `process.env.LAYA_API_KEY`. */
   apiKey?: string;
-  /** Defaults to `jev-latest`. */
+  /** Checkpoint name for `laya-serve`, omitted when unset. Defaults to `process.env.LAYA_MODEL`. */
   model?: string;
-  /** Defaults to the System One endpoint. */
-  baseUrl?: string;
+  /** Token window sent as `max_len`. */
+  maxLen?: number;
   /** Defaults to the global `fetch`. */
   fetch?: typeof fetch;
 }
 
-/** Asks Jev over HTTP with the global `fetch` (or an injected one). */
-export class JevClient implements JevAsker {
-  private readonly apiKey: string;
+/** Asks a `laya-serve` server over HTTP with the global `fetch` (or an injected one). */
+export class LayaClient implements LayaAsker {
+  private readonly url: string;
+  private readonly apiKey: string | undefined;
   private readonly model: string | undefined;
-  private readonly baseUrl: string | undefined;
+  private readonly maxLen: number | undefined;
   private readonly fetcher: typeof fetch;
 
-  constructor(options: JevClientOptions = {}) {
-    this.apiKey = options.apiKey ?? process.env.TYPESAFE_API_KEY ?? '';
-    this.model = options.model;
-    this.baseUrl = options.baseUrl;
+  constructor(options: LayaClientOptions = {}) {
+    this.url = options.url ?? process.env.LAYA_URL ?? '';
+    this.apiKey = options.apiKey ?? (process.env.LAYA_API_KEY || undefined);
+    this.model = options.model ?? (process.env.LAYA_MODEL || undefined);
+    this.maxLen = options.maxLen;
     this.fetcher = options.fetch ?? fetch;
   }
 
-  async ask(state: JevState, questions: JevQuestions): Promise<JevResponse> {
-    if (!this.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-    const request = buildJevRequest(
-      { apiKey: this.apiKey, model: this.model, baseUrl: this.baseUrl },
+  async ask(state: LayaState, questions: LayaQuestions): Promise<LayaResponse> {
+    if (!this.url) throw new Error('LAYA_URL is not configured');
+    const request = buildLayaRequest(
+      { url: this.url, apiKey: this.apiKey, model: this.model, maxLen: this.maxLen },
       state,
       questions,
     );
@@ -38,6 +42,6 @@ export class JevClient implements JevAsker {
       headers: request.headers,
       body: request.body,
     });
-    return parseJevResponse(response.status, response.ok, await response.text());
+    return parseLayaResponse(response.status, response.ok, await response.text());
   }
 }

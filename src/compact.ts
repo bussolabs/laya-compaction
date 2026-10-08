@@ -1,4 +1,4 @@
-import { noulAnswer } from './request.js';
+import { DEFAULT_MAX_LEN, noulAnswer } from './request.js';
 import { collectToolCalls, estimateTokens, fitState } from './state.js';
 import type {
   CallAnswer,
@@ -6,19 +6,26 @@ import type {
   CompactOptions,
   CompactResult,
   CompactionState,
-  JevAsker,
-  JevQuestions,
+  LayaAsker,
+  LayaQuestions,
   Message,
   ResolvedCompactOptions,
   ToolCall,
   ToolUse,
 } from './types.js';
 
+/**
+ * Tokens reserved in Laya's window for one question header (type, instructions
+ * and the two noul options); the state gets the rest of `maxLen`.
+ */
+export const QUESTION_HEADER_TOKENS = 112;
+
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   goal: '',
   keepThreshold: 0.5,
   preserveRecentMessages: 6,
-  maxStateTokens: 25_000,
+  maxLen: DEFAULT_MAX_LEN,
+  maxStateTokens: DEFAULT_MAX_LEN - QUESTION_HEADER_TOKENS,
   maxRequestTokens: 30_000,
   truncateHeadChars: 300,
 };
@@ -31,6 +38,7 @@ function finite(value: number | undefined, fallback: number): number {
 }
 
 export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOptions {
+  const maxLen = Math.max(1, Math.floor(finite(options.maxLen, DEFAULT_OPTIONS.maxLen)));
   return {
     goal: options.goal ?? DEFAULT_OPTIONS.goal,
     keepThreshold: finite(options.keepThreshold, DEFAULT_OPTIONS.keepThreshold),
@@ -40,7 +48,11 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
         finite(options.preserveRecentMessages, DEFAULT_OPTIONS.preserveRecentMessages),
       ),
     ),
-    maxStateTokens: Math.max(1, finite(options.maxStateTokens, DEFAULT_OPTIONS.maxStateTokens)),
+    maxLen,
+    maxStateTokens: Math.max(
+      1,
+      finite(options.maxStateTokens, maxLen - QUESTION_HEADER_TOKENS),
+    ),
     maxRequestTokens: Math.max(
       1,
       finite(options.maxRequestTokens, DEFAULT_OPTIONS.maxRequestTokens),
@@ -53,7 +65,7 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
 }
 
 /** The two `noul` questions asked about one call: keep the call, keep its result. */
-export function questionsFor(call: ToolCall): JevQuestions {
+export function questionsFor(call: ToolCall): LayaQuestions {
   return {
     [`call_${call.id}`]: {
       type: 'noul',
@@ -115,12 +127,17 @@ export function decideCall(
 }
 
 async function askBatch(
-  asker: JevAsker,
+  asker: LayaAsker,
   state: CompactionState,
   batch: readonly ToolCall[],
 ): Promise<Map<string, CallAnswer>> {
-  const questions: JevQuestions = Object.assign({}, ...batch.map(questionsFor));
-  const { answers } = await asker.ask(state, questions);
+  const questions: LayaQuestions = Object.assign({}, ...batch.map(questionsFor));
+  const { answers, usage } = await asker.ask(state, questions);
+  if (usage?.truncated) {
+    throw new Error(
+      `Laya read a truncated state (questions ${(usage.truncated_questions ?? []).join(', ') || 'unknown'}); raise maxLen or lower maxStateTokens`,
+    );
+  }
   return new Map(
     batch.map((call) => [
       call.id,
@@ -135,7 +152,7 @@ async function askBatch(
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
   if (text.length <= headChars + 120) return text;
   const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+  return `${head}[laya-compaction truncated ${text.length - headChars} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
 }
@@ -248,15 +265,15 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
 }
 
 /**
- * Compacts a transcript by asking Jev, for every tool call outside the pinned
+ * Compacts a transcript by asking Laya, for every tool call outside the pinned
  * first and newest messages, whether the call and whether its result must
  * stay. The whole history (results omitted, fitted into `maxStateTokens`) is
- * sent as state with every batch of questions. Throws when Jev fails or the
+ * sent as state with every batch of questions. Throws when Laya fails or the
  * history cannot be fitted; the caller decides whether to fall back.
  */
 export async function compact(
   messages: readonly Message[],
-  asker: JevAsker,
+  asker: LayaAsker,
   options: CompactOptions = {},
 ): Promise<CompactResult> {
   const started = Date.now();

@@ -1,54 +1,62 @@
-import type { JevAnswer, JevQuestions, JevResponse, JevState } from './types.js';
+import type { LayaAnswer, LayaQuestions, LayaResponse, LayaState } from './types.js';
 
-export const SYSTEM_ONE_URL = 'https://api.typesafe.ai/v1/systemone';
-export const DEFAULT_MODEL = 'jev-latest';
+/** Path of the Jev-compatible decision route `laya-serve` exposes. */
+export const SYSTEM_ONE_PATH = '/v1/systemone';
 
-export interface JevRequest {
+/**
+ * Token window sent as `max_len`. The state and one question header share it,
+ * so it bounds the state budget. The multilingual checkpoint reads up to 8192;
+ * a wider window gives Laya more context and makes every question slower.
+ */
+export const DEFAULT_MAX_LEN = 4096;
+
+export interface LayaRequest {
   url: string;
   method: 'POST';
   headers: Record<string, string>;
   body: string;
 }
 
-/** The HTTP request for one Jev call, for any fetch-like transport. */
-export function buildJevRequest(
+/** The HTTP request for one `laya-serve` call, for any fetch-like transport. */
+export function buildLayaRequest(
   params: {
-    apiKey: string;
+    url: string;
+    apiKey?: string;
     model?: string;
-    baseUrl?: string;
+    maxLen?: number;
   },
-  state: JevState,
-  questions: JevQuestions,
-): JevRequest {
+  state: LayaState,
+  questions: LayaQuestions,
+): LayaRequest {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (params.apiKey) headers.authorization = `Bearer ${params.apiKey}`;
+  const body: Record<string, unknown> = {};
+  if (params.model) body.model = params.model;
+  body.state = state;
+  body.questions = questions;
+  if (params.maxLen !== undefined) body.max_len = params.maxLen;
   return {
-    url: params.baseUrl ?? SYSTEM_ONE_URL,
+    url: `${params.url.replace(/\/+$/, '')}${SYSTEM_ONE_PATH}`,
     method: 'POST',
-    headers: {
-      authorization: `Bearer ${params.apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: params.model ?? DEFAULT_MODEL,
-      state,
-      questions,
-    }),
+    headers,
+    body: JSON.stringify(body),
   };
 }
 
-/** Validates a Jev response body; throws on anything but an `answers` object. */
-export function parseJevResponse(
+/** Validates a Laya response body; throws on anything but an `answers` object. */
+export function parseLayaResponse(
   status: number,
   ok: boolean,
   text: string,
-): JevResponse {
+): LayaResponse {
   if (!ok) {
-    throw new Error(`Jev request failed (${status}): ${text.slice(0, 200)}`);
+    throw new Error(`Laya request failed (${status}): ${text.slice(0, 200)}`);
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error('Jev returned malformed JSON');
+    throw new Error('Laya returned malformed JSON');
   }
   if (
     parsed === null ||
@@ -57,14 +65,14 @@ export function parseJevResponse(
     parsed.answers === null ||
     typeof parsed.answers !== 'object'
   ) {
-    throw new Error('Jev response is missing answers');
+    throw new Error('Laya response is missing answers');
   }
-  return parsed as JevResponse;
+  return parsed as LayaResponse;
 }
 
 /** The `noul` probability of one answer; throws when it is not there. */
 export function noulAnswer(
-  answers: Record<string, JevAnswer>,
+  answers: Record<string, LayaAnswer>,
   name: string,
 ): number {
   const answer = answers[name];
@@ -74,7 +82,7 @@ export function noulAnswer(
     typeof answer.noul !== 'number' ||
     !Number.isFinite(answer.noul)
   ) {
-    throw new Error(`Invalid Jev answer for ${name}`);
+    throw new Error(`Invalid Laya answer for ${name}`);
   }
   return answer.noul;
 }

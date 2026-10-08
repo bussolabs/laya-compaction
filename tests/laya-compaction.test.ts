@@ -2,20 +2,26 @@ import { describe, expect, it } from 'vitest';
 import {
   applyDecisions,
   batchCalls,
-  buildJevRequest,
+  buildLayaRequest,
   collectToolCalls,
   compact,
   compactMessages,
   decideCall,
   estimateTokens,
   fitState,
-  JevClient,
-  parseJevResponse,
+  ensureLocalServer,
+  LayaClient,
+  LOCAL_DEFAULT_PORT,
+  localPort,
+  SPAWN_SCRIPT,
+  spawnArgv,
+  type LocalServerDriver,
+  parseLayaResponse,
   reductionRatio,
   resolveOptions,
   type HistoryToolCall,
-  type JevAsker,
-  type JevQuestions,
+  type LayaAsker,
+  type LayaQuestions,
   type Message,
   type ToolCall,
 } from '../src/index.js';
@@ -52,9 +58,9 @@ function transcript(): Message[] {
 
 type Seen = { state: unknown; questions: string[] };
 
-function fakeJev(answer: (name: string) => number, seen: Seen[] = []): JevAsker {
+function fakeLaya(answer: (name: string) => number, seen: Seen[] = []): LayaAsker {
   return {
-    async ask(state, questions: JevQuestions) {
+    async ask(state, questions: LayaQuestions) {
       seen.push({ state, questions: Object.keys(questions) });
       return {
         answers: Object.fromEntries(
@@ -76,10 +82,13 @@ describe('options', () => {
     expect(resolveOptions()).toMatchObject({
       keepThreshold: 0.5,
       preserveRecentMessages: 6,
-      maxStateTokens: 25_000,
+      maxLen: 4096,
+      maxStateTokens: 3984,
       maxRequestTokens: 30_000,
       truncateHeadChars: 300,
     });
+    expect(resolveOptions({ maxLen: 1024 })).toMatchObject({ maxLen: 1024, maxStateTokens: 912 });
+    expect(resolveOptions({ maxLen: 4096, maxStateTokens: 1000 }).maxStateTokens).toBe(1000);
     expect(resolveOptions({
       keepThreshold: Number.NaN,
       preserveRecentMessages: 2.7,
@@ -294,10 +303,10 @@ describe('decisions', () => {
     expect(kept[0]).toBe(messages[0]);
     expect(kept[2]).not.toBe(messages[4]);
     expect(kept[2]?.toolUses[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+      new RegExp(`^${'x'.repeat(300)}\\n\\[laya-compaction truncated 1700 chars`),
     );
     expect(kept[3]?.toolResults?.[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+      new RegExp(`^${'x'.repeat(300)}\\n\\[laya-compaction truncated 1700 chars`),
     );
     expect(kept[2]).not.toBe(messages[4]);
     expect(kept[3]).not.toBe(messages[5]);
@@ -321,13 +330,13 @@ describe('decisions', () => {
 
     const kept = applyDecisions(messages, decisions, calls, 50);
     expect(kept[2]?.toolResults?.[0]?.text).toBe(
-      `${original.slice(0, 50)}\n[fast-jev-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]`,
+      `${original.slice(0, 50)}\n[laya-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]`,
     );
     expect(kept[1]?.toolUses[0]?.text).toBe(kept[2]?.toolResults?.[0]?.text);
 
     const noHead = applyDecisions(messages, decisions, calls, 0);
     expect(noHead[2]?.toolResults?.[0]?.text).toBe(
-      `[fast-jev-compaction truncated ${total} chars of this tool result; re-run the tool if needed]`,
+      `[laya-compaction truncated ${total} chars of this tool result; re-run the tool if needed]`,
     );
   });
 });
@@ -343,7 +352,7 @@ describe('compact', () => {
     }).tokens;
     const output = await compact(
       messages,
-      fakeJev((name) => (name.startsWith('call_') ? 0.9 : 0.1), seen),
+      fakeLaya((name) => (name.startsWith('call_') ? 0.9 : 0.1), seen),
       { preserveRecentMessages: 1, maxRequestTokens: stateTokens + 150 },
     );
 
@@ -364,70 +373,235 @@ describe('compact', () => {
     expect(reductionRatio(output)).toBeGreaterThan(0);
   });
 
-  it('keeps everything without calling Jev when no tool call is a candidate', async () => {
+  it('keeps everything without calling Laya when no tool call is a candidate', async () => {
     const seen: Seen[] = [];
     const messages = [message('user', 'hello'), message('assistant', 'hi')];
-    const output = await compact(messages, fakeJev(() => 0, seen));
+    const output = await compact(messages, fakeLaya(() => 0, seen));
     expect(seen).toHaveLength(0);
     expect(output.stats).toMatchObject({ requests: 0, stateStage: '', calls: 0 });
     expect(output.messages).toEqual(messages);
   });
 
-  it('reports a tiny reduction when Jev wants everything kept', async () => {
-    const output = await compact(transcript(), fakeJev(() => 0.95), { preserveRecentMessages: 1 });
+  it('reports a tiny reduction when Laya wants everything kept', async () => {
+    const output = await compact(transcript(), fakeLaya(() => 0.95), { preserveRecentMessages: 1 });
     expect(output.decisions.every((d) => d.action === 'keep')).toBe(true);
     expect(reductionRatio(output)).toBe(0);
   });
 
   it('rejects malformed answers', async () => {
-    const broken: JevAsker = {
+    const broken: LayaAsker = {
       ask: async () => ({ answers: { call_t1: { noul: 0.5 } } }),
     };
     await expect(compact(transcript(), broken, { preserveRecentMessages: 1 })).rejects.toThrow(
-      /Invalid Jev answer/,
+      /Invalid Laya answer/,
     );
   });
 });
 
-describe('HTTP client', () => {
-  it('builds a System One request', () => {
-    const request = buildJevRequest({ apiKey: 'k' }, { a: 1 }, {
+function fakeFetch(bodies: string[], urls: string[] = [], headers: Record<string, string>[] = []) {
+  return (async (url: string | URL | Request, init?: RequestInit) => {
+    urls.push(String(url));
+    bodies.push(String(init?.body));
+    headers.push({ ...(init?.headers as Record<string, string>) });
+    return new Response(JSON.stringify({ answers: { q: { noul: 0.4 } } }), { status: 200 });
+  }) as typeof fetch;
+}
+
+describe('remote client', () => {
+  it('builds a laya-serve request with auth and model only when set', () => {
+    const request = buildLayaRequest({ url: 'http://127.0.0.1:8000/', apiKey: 'k', model: 'multilingual' }, { a: 1 }, {
       q: { type: 'noul', instructions: 'x' },
     });
-    expect(request.url).toBe('https://api.typesafe.ai/v1/systemone');
+    expect(request.url).toBe('http://127.0.0.1:8000/v1/systemone');
     expect(request.headers.authorization).toBe('Bearer k');
     expect(JSON.parse(request.body)).toEqual({
-      model: 'jev-latest',
+      model: 'multilingual',
       state: { a: 1 },
       questions: { q: { type: 'noul', instructions: 'x' } },
     });
+
+    const bare = buildLayaRequest({ url: 'https://laya.example.com/laya' }, 's', {});
+    expect(bare.url).toBe('https://laya.example.com/laya/v1/systemone');
+    expect(bare.headers.authorization).toBeUndefined();
+    expect(JSON.parse(bare.body)).toEqual({ state: 's', questions: {} });
+
+    const windowed = buildLayaRequest({ url: 'http://h', maxLen: 4096 }, 's', {});
+    expect(JSON.parse(windowed.body)).toEqual({ state: 's', questions: {}, max_len: 4096 });
   });
 
   it('rejects failed and malformed responses', () => {
-    expect(() => parseJevResponse(500, false, 'boom')).toThrow(/500/);
-    expect(() => parseJevResponse(200, true, 'not json')).toThrow(/malformed/);
-    expect(() => parseJevResponse(200, true, '{}')).toThrow(/missing answers/);
-    expect(parseJevResponse(200, true, '{"answers":{}}')).toEqual({ answers: {} });
+    expect(() => parseLayaResponse(500, false, 'boom')).toThrow(/500/);
+    expect(() => parseLayaResponse(200, true, 'not json')).toThrow(/malformed/);
+    expect(() => parseLayaResponse(200, true, '{}')).toThrow(/missing answers/);
+    expect(parseLayaResponse(200, true, '{"answers":{}}')).toEqual({ answers: {} });
   });
 
-  it('asks over fetch and refuses to run without a key', async () => {
+  it('asks over fetch, with and without a key, and refuses to run without a URL', async () => {
     const bodies: string[] = [];
-    const client = new JevClient({
-      apiKey: 'k',
-      model: 'jev-test',
-      fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
-        bodies.push(String(init?.body));
-        return new Response(JSON.stringify({ answers: { q: { noul: 0.4 } } }), { status: 200 });
-      }) as typeof fetch,
-    });
+    const urls: string[] = [];
+    const headers: Record<string, string>[] = [];
+    const client = new LayaClient({ url: 'http://h', apiKey: 'k', model: 'english', fetch: fakeFetch(bodies, urls, headers) });
     const response = await client.ask('state', { q: { type: 'noul', instructions: 'x' } });
     expect(response.answers.q).toEqual({ noul: 0.4 });
-    expect(JSON.parse(bodies[0]!).model).toBe('jev-test');
+    expect(urls[0]).toBe('http://h/v1/systemone');
+    expect(headers[0]!.authorization).toBe('Bearer k');
+    expect(JSON.parse(bodies[0]!).model).toBe('english');
 
-    const keyless = new JevClient({ apiKey: '' });
-    await expect(keyless.ask('s', {})).rejects.toThrow(/TYPESAFE_API_KEY/);
-    await expect(
-      compactMessages(transcript(), { apiKey: '', preserveRecentMessages: 1 }),
-    ).rejects.toThrow(/TYPESAFE_API_KEY/);
+    const open = new LayaClient({ url: 'http://h', apiKey: '', model: '', fetch: fakeFetch(bodies, urls, headers) });
+    await open.ask('state', {});
+    expect(headers[1]!.authorization).toBeUndefined();
+    expect(JSON.parse(bodies[1]!)).not.toHaveProperty('model');
+
+    const urlless = new LayaClient({ url: '' });
+    await expect(urlless.ask('s', {})).rejects.toThrow(/LAYA_URL/);
+  });
+
+  it('compactMessages goes remote when a URL is given', async () => {
+    const urls: string[] = [];
+    const output = await compactMessages(transcript(), {
+      url: 'http://h',
+      preserveRecentMessages: 1,
+      fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        urls.push(String(url));
+        const { questions } = JSON.parse(String(init?.body)) as { questions: LayaQuestions };
+        const answers = Object.fromEntries(Object.keys(questions).map((key) => [key, { noul: 0.9 }]));
+        return new Response(JSON.stringify({ answers }), { status: 200 });
+      }) as typeof fetch,
+    });
+    expect(urls.length).toBeGreaterThan(0);
+    expect(output.stats.kept).toBeGreaterThan(0);
+  });
+});
+
+describe('truncation guard', () => {
+  it('throws when laya-serve reports a truncated state instead of deciding on it', async () => {
+    const truncating: LayaAsker = {
+      ask: async (_state, questions) => ({
+        answers: Object.fromEntries(Object.keys(questions).map((key) => [key, { noul: 0.1 }])),
+        usage: { truncated: true, truncated_questions: ['call_t1'] },
+      }),
+    };
+    await expect(compact(transcript(), truncating, { preserveRecentMessages: 1 })).rejects.toThrow(
+      /truncated state \(questions call_t1\)/,
+    );
+  });
+
+  it('accepts answers whose usage says nothing was cut', async () => {
+    const whole: LayaAsker = {
+      ask: async (_state, questions) => ({
+        answers: Object.fromEntries(Object.keys(questions).map((key) => [key, { noul: 0.9 }])),
+        usage: { truncated: false, truncated_questions: [] },
+      }),
+    };
+    const output = await compact(transcript(), whole, { preserveRecentMessages: 1 });
+    expect(output.stats.kept).toBeGreaterThan(0);
+  });
+});
+
+type FakeServer = LocalServerDriver & { spawned: (readonly string[])[]; clock: number };
+
+function fakeServer(options: { upAfterPolls?: number; up?: boolean; exitCode?: number } = {}): FakeServer {
+  let polls = 0;
+  let spawned = false;
+  const server: FakeServer = {
+    spawned: [],
+    clock: 0,
+    async health() {
+      if (options.up) return true;
+      if (!spawned) return false;
+      polls += 1;
+      return options.upAfterPolls !== undefined && polls >= options.upAfterPolls;
+    },
+    async spawn(argv) {
+      server.spawned.push(argv);
+      spawned = true;
+      return { exitCode: options.exitCode ?? 0, stderr: options.exitCode ? 'boom' : '' };
+    },
+    async sleep(ms) {
+      server.clock += ms;
+    },
+    now: () => server.clock,
+  };
+  return server;
+}
+
+describe('local server', () => {
+  it('uses LAYA_LOCAL_PORT when valid, else 8765', () => {
+    expect(localPort('8766')).toBe(8766);
+    expect(localPort(undefined)).toBe(LOCAL_DEFAULT_PORT);
+    expect(localPort('nope')).toBe(8765);
+  });
+
+  it('does not spawn when the server already answers', async () => {
+    const server = fakeServer({ up: true });
+    await expect(ensureLocalServer(server, { root: '/p', port: 8765 })).resolves.toBe('http://127.0.0.1:8765');
+    expect(server.spawned).toEqual([]);
+  });
+
+  it('spawns once and waits until health answers', async () => {
+    const server = fakeServer({ upAfterPolls: 3 });
+    const url = await ensureLocalServer(server, { root: '/plugin', port: 8766, checkpoint: '/ckpt' });
+    expect(url).toBe('http://127.0.0.1:8766');
+    expect(server.spawned).toEqual([['sh', '-c', SPAWN_SCRIPT, 'sh', '/plugin', '8766', '/ckpt']]);
+    expect(server.clock).toBe(3000);
+  });
+
+  it('names uv when it is missing, and reports other start failures', async () => {
+    await expect(ensureLocalServer(fakeServer({ exitCode: 127 }), { root: '/p', port: 1 })).rejects.toThrow(/uv is not installed/);
+    await expect(ensureLocalServer(fakeServer({ exitCode: 2 }), { root: '/p', port: 1 })).rejects.toThrow(/could not start laya-serve \(2\): boom/);
+  });
+
+  it('gives up after the startup timeout', async () => {
+    const server = fakeServer();
+    await expect(ensureLocalServer(server, { root: '/p', port: 1, timeoutMs: 5000 })).rejects.toThrow(/did not answer/);
+    expect(server.clock).toBe(5000);
+  });
+
+  it('spawns detached laya-serve 0.4.0 on multilingual behind a lock', () => {
+    expect(spawnArgv('/p', 8765)).toEqual(['sh', '-c', SPAWN_SCRIPT, 'sh', '/p', '8765']);
+    for (const part of [
+      'uv tool run --python 3.12 --from "laya[serve]==0.4.0" python "$launcher" "$port"',
+      'LAYA_HOST=127.0.0.1',
+      'LAYA_DEFAULT_MODEL=multilingual',
+      'LAYA_IDLE_UNLOAD_SECONDS=900',
+      '${checkpoint:+"LAYA_CHECKPOINT=$checkpoint"}',
+      'nohup',
+      '>> "$dir/serve.log" 2>&1 < /dev/null &',
+      'dir="$HOME/.cache/laya-local"',
+      'lock="$dir/spawn.lock"',
+      '( set -C; : > "$lock" )',
+      'pgrep -f "laya_serve.py $port"',
+      'exit 127',
+    ]) {
+      expect(SPAWN_SCRIPT).toContain(part);
+    }
+  });
+
+  it('compactMessages goes local without a URL: starts the server and asks for multilingual', async () => {
+    const previous = process.env.LAYA_URL;
+    delete process.env.LAYA_URL;
+    const server = fakeServer({ upAfterPolls: 1 });
+    const bodies: string[] = [];
+    const urls: string[] = [];
+    try {
+      const output = await compactMessages(transcript(), {
+        preserveRecentMessages: 1,
+        localPort: 8799,
+        driver: server,
+        fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+          urls.push(String(url));
+          bodies.push(String(init?.body));
+          const { questions } = JSON.parse(String(init?.body)) as { questions: LayaQuestions };
+          const answers = Object.fromEntries(Object.keys(questions).map((key) => [key, { noul: 0.9 }]));
+          return new Response(JSON.stringify({ answers }), { status: 200 });
+        }) as typeof fetch,
+      });
+      expect(server.spawned).toHaveLength(1);
+      expect(urls[0]).toBe('http://127.0.0.1:8799/v1/systemone');
+      expect(JSON.parse(bodies[0]!)).toMatchObject({ model: 'multilingual', max_len: 4096 });
+      expect(output.stats.kept).toBeGreaterThan(0);
+    } finally {
+      if (previous !== undefined) process.env.LAYA_URL = previous;
+    }
   });
 });

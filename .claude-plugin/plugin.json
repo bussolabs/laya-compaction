@@ -1,19 +1,29 @@
 {
-  "name": "fast-jev-compaction",
-  "version": "0.3.0",
-  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "name": "laya-compaction",
+  "version": "0.1.0",
+  "description": "Verbatim Laya-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
+    "url": {
+      "type": "string",
+      "title": "Laya server URL",
+      "description": "Base URL of a laya-serve server (remote mode). Leave unset to use LAYA_URL; when both are unset the plugin starts a shared local laya-serve (needs uv)."
+    },
     "apiKey": {
       "type": "string",
-      "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
+      "title": "Laya server API key",
+      "description": "Bearer key of the laya-serve server. Leave unset to use LAYA_API_KEY.",
       "sensitive": true
+    },
+    "model": {
+      "type": "string",
+      "title": "Laya checkpoint",
+      "description": "Remote mode: checkpoint name sent to laya-serve (english, multilingual, typed-decisions). Leave unset to use LAYA_MODEL or let the server choose. Local mode always uses multilingual."
     },
     "keepThreshold": {
       "type": "number",
       "title": "Keep threshold",
-      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
+      "description": "Minimum Laya probability that a tool call or tool result is still needed; below it the item is removed.",
       "default": 0.5
     },
     "preserveRecentMessages": {
@@ -34,29 +44,28 @@
       "description": "Minimum estimated character reduction required to replace history.",
       "default": 0.25
     },
+    "maxLen": {
+      "type": "number",
+      "title": "Laya token window",
+      "description": "Token window the state and one question share, sent as max_len (up to 8192 on multilingual). Wider means more context and slower questions.",
+      "default": 4096
+    },
     "maxStateTokens": {
       "type": "number",
-      "title": "Maximum Jev state tokens",
-      "description": "Estimated token budget for the conversation state sent with every Jev request.",
-      "default": 25000
+      "title": "Maximum Laya state tokens",
+      "description": "Estimated token budget for the conversation state sent with every Laya request. Defaults to maxLen minus 112."
     },
     "maxRequestTokens": {
       "type": "number",
-      "title": "Maximum Jev request tokens",
-      "description": "Estimated token budget for state plus questions in one Jev request.",
+      "title": "Maximum Laya request tokens",
+      "description": "Estimated token budget for state plus questions in one Laya request.",
       "default": 30000
     },
     "truncateHeadChars": {
       "type": "number",
       "title": "Truncated tool result head",
-      "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
+      "description": "Characters of a tool result kept when Laya decides its full output is no longer needed; 0 keeps only the note.",
       "default": 300
-    },
-    "model": {
-      "type": "string",
-      "title": "Jev model",
-      "description": "TypeSafe Jev model name.",
-      "default": "jev-latest"
     }
   }
 }

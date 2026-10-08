@@ -1,0 +1,10 @@
+{
+  "call_{id}": {
+    "type": "noul",
+    "instructions": "Tool call {id} ({tool}) should stay in the history: knowing this call was made, with its input, still matters for what the assistant does next"
+  },
+  "result_{id}": {
+    "type": "noul",
+    "instructions": "The full output of tool call {id} ({tool}, {chars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do"
+  }
+}

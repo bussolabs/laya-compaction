@@ -1,11 +1,17 @@
 {
-  "name": "fast-jev-compaction",
-  "version": "0.2.0",
-  "description": "Continuous, verbatim context compaction for LLM agents using TypeSafe's Jev model.",
+  "name": "laya-compaction",
+  "version": "0.1.0",
+  "description": "Continuous, verbatim context compaction for LLM agents using the Laya decision model, through a local or remote laya-serve.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bussolabs/laya-compaction.git"
+  },
+  "homepage": "https://github.com/bussolabs/laya-compaction#readme",
+  "bugs": "https://github.com/bussolabs/laya-compaction/issues",
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "exports": {
     ".": {
@@ -15,6 +21,7 @@
   },
   "files": [
     "dist",
+    "serve",
     "README.md",
     "LICENSE"
   ],
@@ -24,7 +31,11 @@
     "test": "vitest run",
     "demo": "tsx examples/demo.ts",
     "typecheck:hooks": "tsc -p tsconfig.hooks.json",
-    "validate:plugin": "claude plugin validate .claude-plugin/plugin.json"
+    "validate:plugin": "claude plugin validate .claude-plugin/plugin.json",
+    "prepare": "npm run build",
+    "tuning:validate": "tsx tuning/validate.ts",
+    "tuning:questions": "tsx tuning/export-questions.ts",
+    "tuning:examples": "tsx tuning/build-examples.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
