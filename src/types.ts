@@ -76,6 +76,8 @@ export interface HistoryEntry {
   text: string;
   /** Structured per call, or one compact line per call once the state has to shrink. */
   tool_calls?: HistoryToolCall[] | string[];
+  /** Calls still waiting for their result: shown, never asked about. */
+  pending_calls?: string[];
 }
 
 /** The state sent with every Laya request: the whole history, results omitted. */

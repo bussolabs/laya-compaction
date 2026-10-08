@@ -10,6 +10,12 @@ export const SYSTEM_ONE_PATH = '/v1/systemone';
  */
 export const DEFAULT_MAX_LEN = 4096;
 
+/**
+ * Deadline for one request. A request carries the questions of a whole batch,
+ * about 0.6 s each on Apple silicon at the default window, so it is generous.
+ */
+export const DEFAULT_TIMEOUT_MS = 300_000;
+
 export interface LayaRequest {
   url: string;
   method: 'POST';
@@ -63,26 +69,38 @@ export function parseLayaResponse(
     typeof parsed !== 'object' ||
     !('answers' in parsed) ||
     parsed.answers === null ||
-    typeof parsed.answers !== 'object'
+    typeof parsed.answers !== 'object' ||
+    Array.isArray(parsed.answers)
   ) {
     throw new Error('Laya response is missing answers');
   }
   return parsed as LayaResponse;
 }
 
-/** The `noul` probability of one answer; throws when it is not there. */
+const own = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
+
+/**
+ * The `noul` probability of one answer; throws unless it is the answer's own
+ * `noul`, a number in [0, 1], on an object whose `type`, when present, is
+ * `noul`. Nothing malformed reaches a deletion decision.
+ */
 export function noulAnswer(
   answers: Record<string, LayaAnswer>,
   name: string,
 ): number {
-  const answer = answers[name];
+  const answer: unknown = own(answers, name) ? answers[name] : undefined;
   if (
-    !answer ||
-    !('noul' in answer) ||
-    typeof answer.noul !== 'number' ||
-    !Number.isFinite(answer.noul)
+    answer === null ||
+    typeof answer !== 'object' ||
+    Array.isArray(answer) ||
+    !own(answer, 'noul') ||
+    (own(answer, 'type') && (answer as { type?: unknown }).type !== 'noul')
   ) {
     throw new Error(`Invalid Laya answer for ${name}`);
   }
-  return answer.noul;
+  const noul = (answer as { noul: unknown }).noul;
+  if (typeof noul !== 'number' || !(noul >= 0 && noul <= 1)) {
+    throw new Error(`Invalid Laya answer for ${name}: ${String(noul)} is not a probability`);
+  }
+  return noul;
 }

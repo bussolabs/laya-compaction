@@ -81,7 +81,7 @@ describe('hook config', () => {
 });
 
 describe('session message mapping', () => {
-  it('returns the engine objects for untouched messages and handle-less copies for rebuilt ones', () => {
+  it('keeps plain user prompts as the engine sent them and rebuilds every other message', () => {
     const messages = transcript();
     const calls = collectToolCalls(messages, 0);
     const decisions = [
@@ -102,11 +102,12 @@ describe('session message mapping', () => {
       new RegExp(`^${'x'.repeat(300)}\\n\\[laya-compaction truncated 1700 chars`),
     );
     expect(out[2]?.toolResults?.[0]).toMatchObject({ tool_use_id: 'tool-1', isError: false });
-    expect(out[3]).toBe(messages[3]);
-    expect(out[4]).toBe(messages[4]);
+    expect(out[3]?.toolUses[0]).toBe(messages[3]!.toolUses[0]);
+    expect(out[4]?.toolResults?.[0]).toBe(messages[4]!.toolResults![0]);
+    expect(out.map((m) => m.handle)).toEqual(['h-0', undefined, undefined, undefined, undefined, undefined, 'h-6']);
   });
 
-  it('preserves short dropped-result messages and their handles', () => {
+  it('leaves short dropped results untouched', () => {
     const messages = transcript();
     messages[1]!.toolUses[0]!.text = 'y'.repeat(100);
     messages[2]!.toolResults![0]!.text = 'y'.repeat(100);
@@ -116,8 +117,8 @@ describe('session message mapping', () => {
       decideCall(calls[1]!, { keepCall: 0.9, keepResult: 0.9 }, { keepThreshold: 0.5 }),
     ];
     const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls, 300));
-    expect(out[1]).toBe(messages[1]);
-    expect(out[2]).toBe(messages[2]);
+    expect(out[1]?.toolUses[0]).toBe(messages[1]!.toolUses[0]);
+    expect(out[2]?.toolResults?.[0]).toBe(messages[2]!.toolResults![0]);
   });
 });
 
@@ -135,7 +136,9 @@ describe('compactSession', () => {
     expect(urls).toEqual(['http://h/v1/systemone']);
     expect(JSON.parse(bodies[0]!).model).toBe('english');
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_call', 'keep']);
-    expect(messages.map((m) => m.handle)).toEqual(['h-0', 'h-tool-2', 'r-tool-2', 'h-5', 'h-6']);
+    expect(messages.map((m) => m.text)).toEqual(['Fix the failing test.', '', '', 'Fixing now.', 'go ahead']);
+    expect(messages[1]!.toolUses[0]!.tool_use_id).toBe('tool-2');
+    expect(messages.map((m) => m.handle)).toEqual(['h-0', undefined, undefined, undefined, 'h-6']);
     expect(summarize(output)).toMatch(/^\d+% reduction; 1 kept, 1 call_dropped; state ~\d+ tokens \(full\) in 1 request\(s\)$/);
     expect(decisionLog(output)).toBe('t1:Read:drop_call/call=0.10/result=0.10 t2:Bash:keep/call=0.90/result=0.90');
     expect(decisionLogLines(output)).toEqual([`decisions: ${decisionLog(output)}`]);

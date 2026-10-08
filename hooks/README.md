@@ -24,6 +24,13 @@ The adapter talks to a `laya-serve` server in one of two ways:
   for up to 10 minutes (the first start downloads the model). `LAYA_MODEL_DIR`
   makes it serve a fine-tuned checkpoint. Without `uv` the hook falls back.
 
+The hook leaves a subagent's or fork's transcript to Claude Code, skips
+`precompute` dispatches, adds the text typed after `/compact` to Laya's goal,
+and returns kept assistant messages and tool results without their engine
+`handle` (so the compaction survives `--resume`); plain user prompts keep it,
+with their pasted images and documents. Auto-compaction runs only after an answered main-loop
+turn. Display failures never change the outcome.
+
 Every request sends `max_len` (`maxLen`, default 4096), and the hook falls
 back when the server reports that it had to truncate the state.
 

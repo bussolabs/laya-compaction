@@ -24,6 +24,8 @@ export async function compactMessages(
         apiKey: '',
         model: LOCAL_MODEL,
         maxLen,
+        timeoutMs: options.timeoutMs,
+        signal: options.signal,
         fetch: options.fetch,
       });
   return compact(messages, client, { ...options, maxLen });

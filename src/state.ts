@@ -16,7 +16,7 @@ const INPUT_CHARS = [1000, 200, 60] as const;
 const TEXT_HEAD = 400;
 const TEXT_TAIL = 150;
 
-const TOKEN_PIECES = /[A-Za-z]+|\d+|[^\sA-Za-z\d]/g;
+const ALNUM_RUN = /[A-Za-z0-9]+/g;
 
 /**
  * Estimates tokens without a tokenizer: a word costs one token per six
@@ -25,27 +25,77 @@ const TOKEN_PIECES = /[A-Za-z]+|\d+|[^\sA-Za-z\d]/g;
  * Laya's tokenizer) for real transcripts, where it lands 2–18%
  * above the true count; a plain characters-per-token ratio undercounts the
  * JSON-heavy states by up to 40%.
+ *
+ * Dense runs (hex, UUIDs, base64) do not split into dictionary words and
+ * tokenize at roughly three characters per token, so they are charged at
+ * least that much.
  */
 export function estimateTokens(text: string): number {
   let tokens = 0;
-  for (const [piece] of text.matchAll(TOKEN_PIECES)) {
+  let last = 0;
+  for (const match of text.matchAll(ALNUM_RUN)) {
+    const run = match[0];
+    const plain = runTokens(run);
+    tokens +=
+      separatorTokens(text.slice(last, match.index)) +
+      (isDenseRun(run) ? Math.max(plain, run.length / 3) : plain);
+    last = match.index + run.length;
+  }
+  return Math.ceil(tokens + separatorTokens(text.slice(last)));
+}
+
+function separatorTokens(chunk: string): number {
+  return chunk.replace(/\s+/g, '').length * 0.9;
+}
+
+function runTokens(run: string): number {
+  let tokens = 0;
+  for (const [piece] of run.matchAll(/[A-Za-z]+|\d+/g)) {
     const first = piece.charCodeAt(0);
     if (first >= 48 && first <= 57) tokens += piece.length / 2;
-    else if ((first >= 65 && first <= 90) || (first >= 97 && first <= 122)) {
-      tokens += 1 + Math.floor((piece.length - 1) / 6);
-    } else tokens += 0.9;
+    else tokens += 1 + Math.floor((piece.length - 1) / 6);
   }
-  return Math.ceil(tokens);
+  return tokens;
+}
+
+/**
+ * A run unlikely to be made of words: letters mixed with digits, or long,
+ * vowel-starved and varied the way base64 is (a repeated character stays on
+ * the word rate).
+ */
+function isDenseRun(run: string): boolean {
+  if (run.length < 8) return false;
+  const hasLetter = /[A-Za-z]/.test(run);
+  if (/\d/.test(run)) return hasLetter;
+  if (!hasLetter || run.length < 16) return false;
+  const vowels = run.match(/[aeiouAEIOU]/g)?.length ?? 0;
+  return vowels / run.length < 0.25 && new Set(run).size >= 8;
+}
+
+const isHigh = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
+const isLow = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
+
+/** The first `end` UTF-16 units, one fewer when the cut would split a surrogate pair. */
+export function headOf(text: string, end: number): string {
+  const cut = Math.max(0, end);
+  return cut > 0 && cut < text.length && isHigh(text.charCodeAt(cut - 1)) ? text.slice(0, cut - 1) : text.slice(0, cut);
+}
+
+/** The last `count` UTF-16 units, one fewer when the cut would split a surrogate pair. */
+function tailOf(text: string, count: number): string {
+  if (count <= 0) return '';
+  const start = Math.max(0, text.length - count);
+  return start > 0 && isLow(text.charCodeAt(start)) ? text.slice(start + 1) : text.slice(start);
 }
 
 export function truncate(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
+  return text.length <= limit ? text : `${headOf(text, limit - 1)}…`;
 }
 
-function abridge(text: string, head: number, tail: number): string {
+export function abridgeText(text: string, head: number, tail: number): string {
   if (text.length <= head + tail + 40) return text;
   const omitted = text.length - head - tail;
-  return `${text.slice(0, head)}\n[… ${omitted} chars omitted …]\n${text.slice(-tail)}`;
+  return `${headOf(text, head)}\n[… ${omitted} chars omitted …]\n${tailOf(text, tail)}`;
 }
 
 export function isPinned(
@@ -67,14 +117,23 @@ export function collectToolCalls(
   const results = new Map<string, { index: number; result: ToolResult }>();
   messages.forEach((message, index) => {
     for (const result of message.toolResults ?? []) {
+      if (results.has(result.tool_use_id)) {
+        throw new Error(`Duplicate tool_result for ${result.tool_use_id}`);
+      }
       results.set(result.tool_use_id, { index, result });
     }
   });
+  const seen = new Set<string>();
   const calls: ToolCall[] = [];
   messages.forEach((message, callIndex) => {
     for (const tool of message.toolUses) {
+      if (seen.has(tool.tool_use_id)) throw new Error(`Duplicate tool_use_id ${tool.tool_use_id}`);
+      seen.add(tool.tool_use_id);
       const found = results.get(tool.tool_use_id);
       if (!found) continue;
+      if (found.index < callIndex) {
+        throw new Error(`The tool_result for ${tool.tool_use_id} precedes its call`);
+      }
       calls.push({
         id: `t${calls.length + 1}`,
         tool_use_id: tool.tool_use_id,
@@ -129,7 +188,7 @@ function mergeCallRuns(history: readonly HistoryEntry[], pinned: (e: HistoryEntr
   for (const entry of history) {
     const previous = merged[merged.length - 1];
     const foldable = (e: HistoryEntry): boolean =>
-      !pinned(e) && e.text.length === 0 && typeof e.tool_calls?.[0] === 'string';
+      !pinned(e) && e.text.length === 0 && !e.pending_calls && typeof e.tool_calls?.[0] === 'string';
     if (previous && foldable(previous) && foldable(entry) && previous.role === entry.role) {
       previous.tool_calls = [...(previous.tool_calls as string[]), ...(entry.tool_calls as string[])];
       continue;
@@ -155,6 +214,7 @@ function historyEntries(
   inputChars: number,
 ): HistoryEntry[] {
   const byMessage = callsByMessage(calls);
+  const paired = new Set(calls.map((call) => call.tool_use_id));
   const entries: HistoryEntry[] = [];
   messages.forEach((message, i) => {
     const toolCalls = (byMessage.get(i) ?? []).map((call) => ({
@@ -163,13 +223,20 @@ function historyEntries(
       input: inputText(call.input, inputChars),
       result: resultNote(call),
     }));
-    if (message.text.trim().length === 0 && toolCalls.length === 0) return;
+    const pending = message.toolUses
+      .filter((tool) => !paired.has(tool.tool_use_id))
+      .map((tool) => `${tool.tool} ${inputText(tool.input, inputChars)} → no result yet`);
+    if (message.text.trim().length === 0 && toolCalls.length === 0 && pending.length === 0) return;
     const entry: HistoryEntry = { i, role: message.role, text: message.text };
     if (toolCalls.length > 0) entry.tool_calls = toolCalls;
+    if (pending.length > 0) entry.pending_calls = pending;
     entries.push(entry);
   });
   return entries;
 }
+
+/** User text the host writes itself: command echoes, notifications, reminders. */
+const HOST_TEXT = /^\s*<(command-name|command-message|local-command-[a-z-]+|task-notification|system-reminder)>/;
 
 /** The last three user prompts, as the default `goal`. */
 export function goalFromMessages(messages: readonly Message[]): string {
@@ -178,6 +245,7 @@ export function goalFromMessages(messages: readonly Message[]): string {
       (message) =>
         message.role === 'user' &&
         message.text.trim().length > 0 &&
+        !HOST_TEXT.test(message.text) &&
         (message.toolResults ?? []).length === 0,
     )
     .slice(-3)
@@ -250,7 +318,7 @@ export function fitState(
     const entry = history[index]!;
     if (entry.text.length <= TEXT_HEAD + TEXT_TAIL + 40) continue;
     shrink(index, (e) => {
-      e.text = abridge(e.text, TEXT_HEAD, TEXT_TAIL);
+      e.text = abridgeText(e.text, TEXT_HEAD, TEXT_TAIL);
     });
     if (fits()) return fitted(history, tokens, 'texts abridged');
   }

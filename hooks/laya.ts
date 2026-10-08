@@ -16,7 +16,13 @@ import {
   localPort,
   type LocalServerDriver,
 } from '../src/local-server.js';
-import { buildLayaRequest, DEFAULT_MAX_LEN, parseLayaResponse } from '../src/request.js';
+import {
+  buildLayaRequest,
+  DEFAULT_MAX_LEN,
+  DEFAULT_TIMEOUT_MS,
+  parseLayaResponse,
+} from '../src/request.js';
+import { goalFromMessages } from '../src/state.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -141,26 +147,30 @@ function toolResultSummary(result: ToolResult): ToolResultSummary {
 }
 
 /**
- * Maps the library's output back onto session messages. Whatever came back
- * unchanged (a message, a tool use, a tool result) is the engine's own object,
- * handle included; anything rebuilt is a fresh message without a handle, so the
- * engine takes the edited content instead of its original.
+ * Maps the library's output back onto session messages. Assistant messages
+ * and tool results go back without the engine's `handle`, so the engine
+ * persists them as fresh records after the compact boundary: a kept message
+ * with its handle survives `--resume` behind the boundary and is multiplied
+ * (upstream #89, #129), and mixing handled and rebuilt rows splits a parallel
+ * tool-call group (#137). The cost: kept assistant messages lose hidden
+ * reasoning. A plain user prompt is never edited and keeps its handle, because
+ * only the handle carries what the summary cannot: pasted images and documents.
+ * Tool uses and results that came back unchanged are the engine's own objects.
  */
 export function toSessionMessages(
   input: readonly SessionMessage[],
   output: readonly Message[],
 ): SessionMessage[] {
-  const messages = new Map<Message, SessionMessage>();
+  const prompts = new Set<Message>();
   const uses = new Map<ToolUse, ToolUseSummary>();
   const results = new Map<ToolResult, ToolResultSummary>();
   for (const message of input) {
-    messages.set(message, message);
+    if (message.role === 'user' && !message.toolResults?.length) prompts.add(message);
     for (const tool of message.toolUses) uses.set(tool, tool);
     for (const result of message.toolResults ?? []) results.set(result, result);
   }
   return output.map((message) => {
-    const own = messages.get(message);
-    if (own) return own;
+    if (prompts.has(message)) return message as SessionMessage;
     const rebuilt: SessionMessage = {
       role: message.role,
       text: message.text,
@@ -196,8 +206,13 @@ export async function compactSession(
   config: HookConfig,
   fetchFn: HookFetch,
   local?: HookLocal,
+  instructions?: string,
 ): Promise<SessionCompaction> {
   const maxLen = config.maxLen ?? DEFAULT_MAX_LEN;
+  // `/compact <text>`: Laya reads it as part of the goal, after the task itself.
+  const goal = instructions?.trim()
+    ? [config.goal || goalFromMessages(messages), instructions.trim()].filter(Boolean).join('\n')
+    : config.goal;
   let asker: LayaAsker;
   if (config.url) {
     asker = layaAsker(fetchFn, { url: config.url, apiKey: config.apiKey, model: config.model, maxLen });
@@ -211,7 +226,7 @@ export async function compactSession(
   } else {
     throw new Error('LAYA_URL is not configured and the local server cannot be started here');
   }
-  const result = await compact(messages, asker, { ...config, maxLen });
+  const result = await compact(messages, asker, { ...config, maxLen, goal });
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -336,8 +351,20 @@ function notify(
   },
   text: string,
 ): void {
-  $.ui.log(text);
-  $.ui.toast(text, { timeoutMs: 15_000 });
+  try {
+    $.ui.log(text);
+    $.ui.toast(text, { timeoutMs: 15_000 });
+  } catch {
+    // Display is best effort: it must never change a compaction or its fallback.
+  }
+}
+
+function logLine($: { ui: { log: (text: string) => void } }, text: string): void {
+  try {
+    $.ui.log(text);
+  } catch {
+    // Best effort, as in notify.
+  }
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -345,18 +372,28 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
 
   on('session.compact', async ($, event, next) => {
+    // A subagent's or fork's own transcript is left to core; a precompute
+    // installs nothing, so nothing is sent to Laya ahead of time.
+    if (event.agentId) return next(event);
+    if (event.trigger === 'precompute') return { skip: 'laya-compaction: no precompute' };
     try {
       const config = await withEnvironment($, configured);
       const { result, messages } = await compactSession(
         event.messages,
         config,
         async (url, init) => {
-          const response = await $.http.fetch(url, init);
+          // $.http.fetch takes no signal, so the deadline is a race.
+          const response = await Promise.race([
+            $.http.fetch(url, init),
+            $.clock.sleep(DEFAULT_TIMEOUT_MS).then(() => undefined),
+          ]);
+          if (!response) throw new Error(`Laya request timed out after ${DEFAULT_TIMEOUT_MS} ms`);
           return { status: response.status, ok: response.ok, text: response.text };
         },
         { driver: hookDriver($, next.signal), root: $.plugin.root },
+        event.instructions,
       );
-      for (const line of decisionLogLines(result)) $.ui.log(line);
+      for (const line of decisionLogLines(result)) logLine($, line);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
           $,
@@ -379,16 +416,16 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (compacting) return next(event);
+    // Only an answered main-loop turn: a subagent's turn reads the main
+    // session's usage too, and an interrupted turn is no moment to compact.
+    if (compacting || event.agentId || event.reason !== 'answer') return next(event);
+    // Claimed before the first await, released only by this dispatch.
+    compacting = true;
     try {
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
-      compacting = true;
-      await $.session.compact();
+      if ((context.percent ?? 0) >= configured.compactAtPercent) await $.session.compact();
     } catch (error) {
-      $.ui.log(
-        `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
-      );
+      logLine($, `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`);
     } finally {
       compacting = false;
     }

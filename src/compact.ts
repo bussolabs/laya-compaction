@@ -1,5 +1,5 @@
 import { DEFAULT_MAX_LEN, noulAnswer } from './request.js';
-import { collectToolCalls, estimateTokens, fitState } from './state.js';
+import { collectToolCalls, estimateTokens, fitState, headOf } from './state.js';
 import type {
   CallAnswer,
   CallDecision,
@@ -37,11 +37,20 @@ function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/** Laya answers probabilities, so a threshold outside [0, 1] would discard even a certain keep. */
+function keepThreshold(value: number | undefined): number {
+  const threshold = finite(value, DEFAULT_OPTIONS.keepThreshold);
+  if (threshold < 0 || threshold > 1) {
+    throw new Error(`keepThreshold must be between 0 and 1, got ${threshold}`);
+  }
+  return threshold;
+}
+
 export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOptions {
   const maxLen = Math.max(1, Math.floor(finite(options.maxLen, DEFAULT_OPTIONS.maxLen)));
   return {
     goal: options.goal ?? DEFAULT_OPTIONS.goal,
-    keepThreshold: finite(options.keepThreshold, DEFAULT_OPTIONS.keepThreshold),
+    keepThreshold: keepThreshold(options.keepThreshold),
     preserveRecentMessages: Math.max(
       0,
       Math.floor(
@@ -149,9 +158,43 @@ async function askBatch(
   );
 }
 
+/** Requests in flight at once for one compaction. */
+export const MAX_CONCURRENT_REQUESTS = 4;
+
+/**
+ * Asks every batch with at most `MAX_CONCURRENT_REQUESTS` in flight. After a
+ * failure nothing more is started; the started ones are awaited, then the
+ * first error is thrown, so no partial set of answers is used.
+ */
+async function askAll(
+  asker: LayaAsker,
+  state: CompactionState,
+  batches: readonly ToolCall[][],
+): Promise<Map<string, CallAnswer>[]> {
+  const answered: Map<string, CallAnswer>[] = [];
+  let nextBatch = 0;
+  let failure: { error: unknown } | undefined;
+  const worker = async (): Promise<void> => {
+    while (!failure && nextBatch < batches.length) {
+      const index = nextBatch;
+      nextBatch += 1;
+      try {
+        answered[index] = await askBatch(asker, state, batches[index]!);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(MAX_CONCURRENT_REQUESTS, batches.length) }, worker),
+  );
+  if (failure) throw failure.error;
+  return answered;
+}
+
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
   if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
+  const head = headChars > 0 ? `${headOf(text, headChars)}\n` : '';
   return `${head}[laya-compaction truncated ${text.length - headChars} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
@@ -289,10 +332,9 @@ export async function compact(
     const state = fitState(messages, calls, resolved);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
-    const answered = await Promise.all(
-      batches.map((batch) => askBatch(asker, state.state, batch)),
-    );
-    for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
+    for (const map of await askAll(asker, state.state, batches)) {
+      for (const [id, answer] of map) answers.set(id, answer);
+    }
   }
 
   const decisions = calls.map((call) =>

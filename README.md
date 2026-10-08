@@ -184,6 +184,8 @@ method) and call `compact(messages, asker, options)`. `LayaClient` and
 | `localPort` | `LAYA_LOCAL_PORT` or `8765` | Port of the local server |
 | `modelDir` | `LAYA_MODEL_DIR` | Fine-tuned checkpoint for the local server |
 | `fetch` | native `fetch` | Injectable fetch implementation for tests |
+| `timeoutMs` | `300000` | Deadline for one request, body included |
+| `signal` | – | Cancels the requests from the caller's side |
 | `goal` | last 3 user prompts | Ongoing task description included in the state |
 | `keepThreshold` | `0.5` | Minimum keep probability for a call or result to stay |
 | `preserveRecentMessages` | `6` | Newest messages never touched (the first is always kept) |
@@ -243,6 +245,12 @@ validator and a step-by-step guide.
 - The base checkpoint is not trained on compaction decisions: in our smoke
   test it kept everything. Fine-tune it (see `tuning/`).
 - Token sizes are estimates from character counts, not Laya's tokenizer.
+- Kept assistant messages and tool results go back to Claude Code as fresh
+  records (no engine handle), so a compaction survives `--resume`; the price
+  is that their hidden reasoning is dropped. Plain user prompts keep their
+  handle and with it pasted images and documents. An image or PDF inside a
+  kept tool result is reduced to its text. Prompts queued while the agent works are not handed
+  to the hook, so a compaction drops them (upstream #133).
 - A probability is not a proof that a result is safe to delete. The assistant
   can always re-run the tool.
 - Speed: ~0.6 s per question at 4096 on Apple silicon (two questions per tool
