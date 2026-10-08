@@ -9,7 +9,7 @@
       "name": "laya-compaction",
       "source": "./",
       "description": "Verbatim Laya-guided compaction for Claude Code sessions.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "license": "MIT"
     }
   ]

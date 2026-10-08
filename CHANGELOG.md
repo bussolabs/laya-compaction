@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.1] - 2026-10-08
 
 - **Compacted sessions survive `--resume`.** Kept assistant messages and tool results go back without their engine handle, so a resume no longer reloads the full history or repeats them. User prompts keep pasted images and documents. ([#89](https://github.com/tamaratran/fast-jev-compaction/issues/89)) ([#129](https://github.com/tamaratran/fast-jev-compaction/issues/129))
 - **Parallel tool calls stay paired.** Truncating one result of a parallel group no longer splits the group, so Claude Code stops inserting "Tool result missing". ([#137](https://github.com/tamaratran/fast-jev-compaction/issues/137))

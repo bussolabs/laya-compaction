@@ -1,6 +1,6 @@
 {
   "name": "laya-compaction",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Verbatim Laya-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
