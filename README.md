@@ -1,5 +1,7 @@
 # laya-compaction
 
+[![npm](https://img.shields.io/npm/v/@bussolabs/laya-compaction)](https://www.npmjs.com/package/@bussolabs/laya-compaction)
+
 > A port of [fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction)
 > by tamaratran. The compaction logic, the state fitting and the Claude Code
 > plugin are theirs; this fork swaps TypeSafe Jev for
@@ -138,6 +140,8 @@ to.
 ```sh
 npm install @bussolabs/laya-compaction
 ```
+
+Package: [@bussolabs/laya-compaction on npm](https://www.npmjs.com/package/@bussolabs/laya-compaction).
 
 ```ts
 import { compactMessages, reductionRatio, type Message } from '@bussolabs/laya-compaction';
