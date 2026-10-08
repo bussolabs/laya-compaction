@@ -1,6 +1,6 @@
 {
   "name": "@bussolabs/laya-compaction",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Continuous, verbatim context compaction for LLM agents using the Laya decision model, through a local or remote laya-serve.",
   "repository": {
     "type": "git",

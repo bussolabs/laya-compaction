@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.2] - 2026-10-08
+
+- **The local server warms up before it reports ready.** A fresh server's first request no longer runs past the routing deadline or stalls a compaction.
+- **Correct first-start download size.** The README now says about 2 GB: Python packages with PyTorch plus the ~650 MB model.
+- **Documented plugin conflicts.** The README says to keep only one compaction plugin enabled and how to disable `fast-jev-compaction`.
+
 ## [0.1.1] - 2026-10-08
 
 - **Compacted sessions survive `--resume`.** Kept assistant messages and tool results go back without their engine handle, so a resume no longer reloads the full history or repeats them. User prompts keep pasted images and documents. ([#89](https://github.com/tamaratran/fast-jev-compaction/issues/89)) ([#129](https://github.com/tamaratran/fast-jev-compaction/issues/129))

@@ -52,9 +52,10 @@ uv tool run --python 3.12 --from "laya[serve]==0.4.0" python serve/laya_serve.py
 
 - **Needs [uv](https://docs.astral.sh/uv/).** Without it local mode fails with
   an error naming uv (the plugin then falls back to Claude Code's summary).
-- **First start:** uv installs Python 3.12 and the server's packages, and the
-  multilingual checkpoint (~1.3 GB) is downloaded. Allow a few minutes; the
-  client waits up to 10. Later starts take ~25 s.
+- **First start:** uv installs Python 3.12 and the server's packages (~1.4 GB
+  with PyTorch), the multilingual checkpoint (~650 MB) is downloaded, and the
+  model is warmed up before the server reports ready. Allow a few minutes; the
+  client waits up to 10. Later starts take ~10–25 s.
 - **Memory:** ~1.5 GB while the model is loaded. After 15 minutes without
   requests the server unloads it and reloads it on the next one.
 - **Logs:** `~/.cache/laya-local/serve.log`. A lock file next to it keeps two
@@ -224,7 +225,10 @@ claude plugin marketplace add bussolabs/laya-compaction
 claude plugin install laya-compaction@laya-compaction
 ```
 
-From then on `/compact` (and auto-compaction) goes through Laya. See
+From then on `/compact` (and auto-compaction) goes through Laya. Keep only
+one compaction plugin enabled: if `fast-jev-compaction` is installed too, both
+handle `session.compact`; disable one with
+`claude plugin disable fast-jev-compaction@fast-jev-compaction`. See
 [`hooks/README.md`](hooks/README.md) for the options. To run from a checkout:
 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 

@@ -15,6 +15,15 @@ checkpoint = os.environ.get("LAYA_CHECKPOINT", "").strip()
 if checkpoint:
     router.register("multilingual", os.path.expanduser(checkpoint))
 router.preload(["multilingual"])
+# The first forward passes on a fresh process are slow (seconds), longer than a
+# routing deadline. Run a short and a long one now, so the first real request
+# finds a warm model.
+for size in (1, 400):
+    router.predict(
+        " ".join(["warm-up"] * size),
+        {"q": {"type": "noul", "instructions": "Is this a warm-up?"}},
+        model="multilingual",
+    )
 uvicorn.run(
     create_app(router),
     host=os.environ.get("LAYA_HOST", "127.0.0.1"),
