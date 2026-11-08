@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.3] - 2026-11-08
+
+- **Patched development tools.** Vitest moves to 3.2.7 and tinypool to 2.x, closing critical and high advisories in the test toolchain. The published package does not change.
+
 ## [0.1.2] - 2026-10-08
 
 - **The local server warms up before it reports ready.** A fresh server's first request no longer runs past the routing deadline or stalls a compaction.
